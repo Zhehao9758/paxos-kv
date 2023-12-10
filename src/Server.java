@@ -14,13 +14,23 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
     private final ConcurrentHashMap<String, String> kvStore = new ConcurrentHashMap<>();
     private AcceptorInterface[] acceptors;
     private LearnerInterface[] learners;
+    // doesn't support dynamic members
     private final int numServers;
     private final int serverId;
     private int paxosRound;
+    // exclude itself, if 2n+1 servers, it would be n rather than n+1
     private final int majorityNum;
+
+    // paxos logs for every instances
     private final Map<Integer, PaxosInstance> instances;
+
+    // lock only for learn, can learn during other operations like propose or accept
     private final ReentrantLock learnLock = new ReentrantLock();
+
+    // write lock for applying operation
     private final ReentrantLock writeLock = new ReentrantLock();
+
+    // flag to simulate failure
     public boolean serviceDown;
 
     /**
@@ -62,14 +72,15 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
 
 
     /**
-     * Propose an operation to be applied.
+     *
      *
      * @param operation The operation to be proposed.
      */
     @Override
     public synchronized String sendCommand(Operation operation) throws RemoteException {
-        // if it is down, cannot communicate with client
+        // if it is down, do nothing, pretend fault
         if(serviceDown) throw new RemoteException("target server is down");
+        // create a new paxos instance
         if (!instances.containsKey(paxosRound)) {
             instances.put(paxosRound, new PaxosInstance(paxosRound, serverId, 0, operation));
         }
@@ -80,7 +91,7 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
 
     @Override
     public synchronized String propose(int round, int proposalId, Operation operation) throws RemoteException {
-        // if operation is null, means just want to catch up
+        // if operation is null, means this server got behind, just want to catch up
         PaxosInstance instanceR = instances.get(round);
         Operation val = prepare(round, proposalId);
         if (val == null) {
@@ -89,14 +100,14 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
         int res = acceptRequest(round, instanceR.num, val);
         if (res == -1) return "cannot communicate with majority";
 
-            // accept request nack by higher Num
+        // accept request nack by higher Num
         else if (res > 0) {
             instanceR.num = nextHigherNum(res);
             return propose(round, instanceR.num, operation);
         }
 
         // success
-        // if not the expected value, try another instance later
+        // if not the expected value, help finish current paxos and try another instance later
         if (operation != null && !operation.equals(val)) {
             applyOperation(round, val);
             return sendCommand(operation);
@@ -104,7 +115,7 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
         return applyOperation(round, val);
     }
 
-    //!!! dirty data
+
     @Override
     public synchronized Operation prepare(int round, int proposalId) throws RemoteException {
         int count = 0;
@@ -112,9 +123,11 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
         Operation acceptedValue = instances.get(round).operation;
         int acceptedNum = 0;
         for (AcceptorInterface acceptor : acceptors) {
+            // itself
             if (acceptor == null) continue;
             try {
                 PromiseMsg msg = acceptor.promise(round, proposalId);
+                // choose accepted value of the highest ballot
                 if (msg.acceptedVal != null && msg.acceptedVal.getKey() > acceptedNum) {
                     acceptedNum = msg.acceptedVal.getKey();
                     acceptedValue = msg.acceptedVal.getValue();
@@ -140,8 +153,10 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
 
     @Override
     public synchronized PromiseMsg promise(int round, int proposalId) throws RemoteException {
+        // if down, do nothing, pretend failure
         if(serviceDown) throw new RemoteException("Cannot get prepare result from acceptor " + serverId);
         while (paxosRound < round) {
+            // if got behind, catch up first
             sendCommand(null);
         }
         if (!instances.containsKey(round)) {
@@ -149,6 +164,7 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
         }
         PaxosInstance instance = instances.get(round);
         PromiseMsg reply = new PromiseMsg(false, instance.promised, instance.acceptedValue);
+        // if it is the highest num, accept it
         if (instance.promised < proposalId) {
             instance.promised = proposalId;
             reply.ack = true;
@@ -164,6 +180,7 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
         int count = 0;
         int promisedNum = -1;
         for (AcceptorInterface acceptor : acceptors) {
+            // itself
             if (acceptor == null) continue;
             try {
                 AcceptReply reply = acceptor.accept(round, proposalId, operation);
@@ -186,6 +203,7 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
     public synchronized AcceptReply accept(int round, int proposalId, Operation proposalValue) throws RemoteException {
         if(serviceDown) throw new RemoteException("Cannot get accept result from acceptor " + serverId);
         while (paxosRound < round) {
+            // catch up
             sendCommand(null);
         }
         PaxosInstance instanceR = instances.get(round);
@@ -193,6 +211,7 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
         instanceR.promised = proposalId;
         instanceR.acceptedValue = new AbstractMap.SimpleEntry<>(proposalId, proposalValue);
 
+        // send out the proposal to learners
         for (LearnerInterface learner : learners) {
             if (learner == null) continue;
             try {
@@ -206,12 +225,12 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
 
     @Override
     public void learn(int round, int proposalId, Operation acceptedValue) throws RemoteException {
-        // Implement Paxos learn logic here
+        // pretend failure
         if(serviceDown) throw new RemoteException("Cannot communicate with learner " + serverId);
         learnLock.lock();
         try {
             while (paxosRound < round) {
-                System.out.println(paxosRound+ " and " + round);
+                // catch up
                 sendCommand(null);
             }
             if (!instances.containsKey(round)) {
@@ -224,6 +243,8 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
                 instanceR.learnerProposalNum = proposalId;
             } else if (instanceR.learnerProposalNum == proposalId) {
                 instanceR.learnerCounter++;
+
+                // apply operation only after receiving majority
                 if (instanceR.learnerCounter >= majorityNum) {
                     applyOperation(round, acceptedValue);
                 }
@@ -250,9 +271,16 @@ public class Server extends UnicastRemoteObject implements ServerInterface, Prop
                 throw new IllegalStateException("not have this round " + round + "this round is " + paxosRound);
             }
             PaxosInstance instanceR = instances.get(round);
+            // if already settled, return result
             if (instanceR.status == 1) return instanceR.clientResponse;
+
+            // wrap up current paxos instance
             instanceR.status = 1;
             paxosRound++;
+
+            // naive garbage collection
+            if(paxosRound > 100) instances.remove(paxosRound - 100);
+
             switch (operation.type) {
                 case "PUT" -> {
                     kvStore.put(operation.key, operation.value);

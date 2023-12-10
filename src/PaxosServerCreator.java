@@ -47,6 +47,8 @@ public class PaxosServerCreator {
                 servers[serverId].setAcceptors(acceptors);
                 servers[serverId].setLearners(learners);
             }
+
+            // randomly change server status to simulate fault
             while(true){
                 // random server and random status
                 int serverId = RandomGenerator.getDefault().nextInt()%5;

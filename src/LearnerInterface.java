@@ -7,11 +7,6 @@ import java.rmi.RemoteException;
  * the learning method to acknowledge an accepted proposal.
  */
 public interface LearnerInterface extends Remote {
-  /**
-   * The learn method is used to inform the Learner of an accepted proposal.
-   *
-   * @param proposalId The unique identifier for the proposal.
-   * @param acceptedValue The value that has been accepted.
-   */
+
   void learn(int round, int proposalId, Operation acceptedValue) throws RemoteException;
 }

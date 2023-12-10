@@ -7,13 +7,12 @@ import java.rmi.RemoteException;
  */
 public interface ProposerInterface extends Remote {
 
-  /**
-   * Initiates a proposal with the given proposal ID and value.
-   *
-   * @param proposalId The unique identifier for the proposal.
-   */
-  Operation prepare(int round, int proposalId) throws RemoteException;
+  // start a complete paxos instance, run whole process from propose to accept, including re-propose
   String propose(int round, int proposalId, Operation operation) throws RemoteException;
+
+  // phase 1 communicate with acceptors and return operation for phase 2
+  Operation prepare(int round, int proposalId) throws RemoteException;
+
 
   // 0 for success, -1 for not enough nodes, > 0 for promisedNum
   int acceptRequest(int round, int proposalId, Operation operation) throws RemoteException;

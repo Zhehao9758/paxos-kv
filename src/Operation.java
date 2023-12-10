@@ -1,5 +1,6 @@
 import java.io.Serializable;
 
+// parse the client command input string
 public class Operation implements Serializable {
     String type;
     String key;
